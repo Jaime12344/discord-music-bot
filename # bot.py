@@ -1,18 +1,29 @@
-# bot.py
 import discord
 from discord.ext import commands
 import yt_dlp as youtube_dl
 import asyncio
 import os
 from collections import deque
+from flask import Flask
+import threading
+
+# --- Servidor Flask para manter o bot acordado no Render ---
+app = Flask('')
+@app.route('/')
+def home():
+    return "Bot de música ativo!"
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+threading.Thread(target=run_web).start()
+# ---------------------------------------------------------
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Fila global por servidor
 queues = {}
-# Status de loop por servidor
 loop_status = {}
 
 FFMPEG_OPTIONS = {
@@ -43,37 +54,31 @@ class MusicPlayer:
         self.ctx = ctx
         self.guild = ctx.guild
         self.voice_client = ctx.voice_client
+        self.last_song = None
 
     async def play_next(self, error=None):
         if error:
-            print(f"Erro no player: {error}")
+            print(f"Erro: {error}")
         guild_id = self.guild.id
         queue = get_queue(guild_id)
         loop = get_loop(guild_id)
 
-        if loop and not queue:
-            # Se estiver em loop e a fila estiver vazia, repete a última música (guardamos separadamente)
-            # Para simplificar, vamos usar um truque: guardar a última música tocada
-            if hasattr(self, 'last_song') and self.last_song:
-                queue.append(self.last_song)
-            else:
-                return
+        if loop and not queue and self.last_song:
+            queue.append(self.last_song)
 
         if queue:
             song = queue.popleft()
-            self.last_song = song  # guarda para loop
-            url = song['url']
+            self.last_song = song
             try:
                 self.voice_client.play(
-                    discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+                    discord.FFmpegPCMAudio(song['url'], **FFMPEG_OPTIONS),
                     after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(e), bot.loop)
                 )
                 await self.ctx.send(f"🎶 A tocar: **{song['title']}**")
             except Exception as e:
-                await self.ctx.send(f"Erro ao tocar: {e}")
+                await self.ctx.send(f"Erro: {e}")
                 await self.play_next()
         else:
-            # Se não houver mais músicas e não estiver em loop, desconecta após 5 min
             await asyncio.sleep(300)
             if not self.voice_client.is_playing():
                 await self.voice_client.disconnect()
@@ -82,7 +87,6 @@ class MusicPlayer:
 
 @bot.command(name='play', aliases=['p'])
 async def play(ctx, *, query):
-    """Toca uma música do YouTube (URL ou pesquisa)"""
     if not ctx.author.voice:
         return await ctx.send("❗ Entra num canal de voz primeiro.")
 
@@ -95,7 +99,6 @@ async def play(ctx, *, query):
     guild_id = ctx.guild.id
     queue = get_queue(guild_id)
 
-    # Se já estiver a tocar, adiciona à fila
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         async with ctx.typing():
             with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
@@ -103,27 +106,20 @@ async def play(ctx, *, query):
                     info = ydl.extract_info(query, download=False)
                     if 'entries' in info:
                         info = info['entries'][0]
-                    song = {
-                        'url': info['url'],
-                        'title': info.get('title', 'Desconhecido')
-                    }
+                    song = {'url': info['url'], 'title': info.get('title', 'Desconhecido')}
                     queue.append(song)
-                    await ctx.send(f"✅ Adicionado à fila: **{song['title']}**")
+                    await ctx.send(f"✅ Adicionado: **{song['title']}**")
                 except Exception as e:
                     await ctx.send(f"❌ Erro: {e}")
         return
 
-    # Se não está a tocar, toca imediatamente
     async with ctx.typing():
         with youtube_dl.YoutubeDL(YDL_OPTIONS) as ydl:
             try:
                 info = ydl.extract_info(query, download=False)
                 if 'entries' in info:
                     info = info['entries'][0]
-                song = {
-                    'url': info['url'],
-                    'title': info.get('title', 'Desconhecido')
-                }
+                song = {'url': info['url'], 'title': info.get('title', 'Desconhecido')}
                 player = MusicPlayer(ctx)
                 player.last_song = song
                 ctx.voice_client.play(
@@ -159,7 +155,7 @@ async def stop(ctx):
         loop_status[guild_id] = False
         await ctx.send("⏹ Fila limpa e música parada.")
     else:
-        await ctx.send("Não estou em nenhum canal.")
+        await ctx.send("Não estou num canal.")
 
 @bot.command(name='skip')
 async def skip(ctx):
